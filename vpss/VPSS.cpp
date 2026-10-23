@@ -27,6 +27,132 @@
 #endif
 
 using BigInt = mpz_class;
+
+// ---------------------------------------------------------------------------------
+// Commitment group backends.
+//
+// The protocol needs a cyclic group of prime order q with two generators g and h. Z_p*
+// with a prime-order subgroup is one instantiation; a prime-order elliptic curve is
+// another. Shamir shares are elements of Z_q either way, so switching the backend leaves
+// the share arithmetic, the serialization and the Python API untouched -- only the
+// commitment arithmetic changes.
+//
+// A group element travels as a BigInt so that every container and serializer stays as it
+// was. For the curve backend an affine point (x, y) is encoded as x * 2^fieldBits + y,
+// with 0 reserved for the point at infinity ((0, 0) is on none of the supported curves).
+//
+// The curve backend is compiled only when VPSS_WITH_EC is defined; setup.py defines it
+// when the OpenSSL headers are present.
+// ---------------------------------------------------------------------------------
+
+enum class GroupType { ZP = 0, EC = 1 };
+
+#ifdef VPSS_WITH_EC
+#include <openssl/ec.h>
+#include <openssl/bn.h>
+#include <openssl/obj_mac.h>
+#include <openssl/sha.h>
+#include <mutex>
+#include <map>
+#include <string>
+
+namespace ecbackend {
+
+inline BN_CTX* ctx() {
+    thread_local BN_CTX* c = BN_CTX_new();      // BN_CTX is not thread safe; distribute() is OpenMP-parallel
+    return c;
+}
+
+inline const EC_GROUP* group(int nid) {
+    static std::mutex m;
+    static std::map<int, EC_GROUP*> cache;      // EC_GROUP is read-only once built, so sharing is safe
+    std::lock_guard<std::mutex> lock(m);
+    auto it = cache.find(nid);
+    if (it != cache.end()) return it->second;
+    EC_GROUP* g = EC_GROUP_new_by_curve_name(nid);
+    if (!g) throw std::runtime_error("unknown curve nid");
+    cache[nid] = g;
+    return g;
+}
+
+inline BIGNUM* toBn(const BigInt& x) {
+    size_t count = 0;
+    std::vector<unsigned char> buf((mpz_sizeinbase(x.get_mpz_t(), 2) + 7) / 8 + 1);
+    mpz_export(buf.data(), &count, 1, 1, 1, 0, x.get_mpz_t());
+    return BN_bin2bn(buf.data(), static_cast<int>(count), nullptr);
+}
+
+inline BigInt fromBn(const BIGNUM* b) {
+    BigInt out(0);
+    int n = BN_num_bytes(b);
+    if (n > 0) {
+        std::vector<unsigned char> buf(static_cast<size_t>(n));
+        BN_bn2bin(b, buf.data());
+        mpz_import(out.get_mpz_t(), static_cast<size_t>(n), 1, 1, 1, 0, buf.data());
+    }
+    return out;
+}
+
+struct Point {
+    const EC_GROUP* grp;
+    EC_POINT* p;
+    explicit Point(const EC_GROUP* g) : grp(g), p(EC_POINT_new(g)) {}
+    ~Point() { if (p) EC_POINT_free(p); }
+    Point(const Point&) = delete;
+    Point& operator=(const Point&) = delete;
+};
+
+inline BigInt encode(int nid, unsigned fieldBits, const EC_POINT* pt) {
+    const EC_GROUP* grp = group(nid);
+    if (EC_POINT_is_at_infinity(grp, pt)) return BigInt(0);
+    BIGNUM* x = BN_new();
+    BIGNUM* y = BN_new();
+    if (!EC_POINT_get_affine_coordinates(grp, pt, x, y, ctx())) {
+        BN_free(x); BN_free(y);
+        throw std::runtime_error("EC_POINT_get_affine_coordinates failed");
+    }
+    BigInt X = fromBn(x);
+    BigInt Y = fromBn(y);
+    BN_free(x); BN_free(y);
+    return (X << fieldBits) + Y;
+}
+
+inline void decode(int nid, unsigned fieldBits, const BigInt& enc, EC_POINT* out) {
+    const EC_GROUP* grp = group(nid);
+    if (enc == 0) { EC_POINT_set_to_infinity(grp, out); return; }
+    BigInt mask = (BigInt(1) << fieldBits) - 1;
+    BigInt Y = enc & mask;
+    BigInt X = enc >> fieldBits;
+    BIGNUM* x = toBn(X);
+    BIGNUM* y = toBn(Y);
+    int ok = EC_POINT_set_affine_coordinates(grp, out, x, y, ctx());
+    BN_free(x); BN_free(y);
+    if (!ok) throw std::runtime_error("encoded value is not a point on the curve");
+}
+
+inline BigInt exp(int nid, unsigned fieldBits, const BigInt& base, const BigInt& e) {
+    const EC_GROUP* grp = group(nid);
+    Point b(grp), r(grp);
+    decode(nid, fieldBits, base, b.p);
+    BIGNUM* k = toBn(e);
+    int ok = EC_POINT_mul(grp, r.p, nullptr, b.p, k, ctx());
+    BN_free(k);
+    if (!ok) throw std::runtime_error("EC_POINT_mul failed");
+    return encode(nid, fieldBits, r.p);
+}
+
+inline BigInt mul(int nid, unsigned fieldBits, const BigInt& a, const BigInt& b) {
+    const EC_GROUP* grp = group(nid);
+    Point A(grp), B(grp), R(grp);
+    decode(nid, fieldBits, a, A.p);
+    decode(nid, fieldBits, b, B.p);
+    if (!EC_POINT_add(grp, R.p, A.p, B.p, ctx())) throw std::runtime_error("EC_POINT_add failed");
+    return encode(nid, fieldBits, R.p);
+}
+
+}  // namespace ecbackend
+#endif  // VPSS_WITH_EC
+
 using Polynomial = std::vector<BigInt>;
 using LagrangeBasis = std::vector<Polynomial>;
 using Matrix = std::vector<std::vector<BigInt>>;
@@ -46,10 +172,16 @@ enum class PaddingMode {
  * @brief Cryptographic public parameters for the VPSS scheme.
  */
 struct PublicParameters {
-    BigInt p; // Large prime for the commitment group (Z_p)
-    BigInt q; // Order of the subgroup (Z_q), where secrets live
+    BigInt p; // Z_p backend: the large prime. EC backend: the field prime (informational).
+    BigInt q; // Order of the group, where secrets and shares live
     BigInt g; // Generator g
     BigInt h; // Generator h (used for Pedersen)
+
+    // Which instantiation of the commitment group is in use. ZP reproduces the original
+    // behaviour exactly; EC carries affine points encoded as x * 2^fieldBits + y.
+    GroupType groupType = GroupType::ZP;
+    int curveNid = 0;          // EC only: OpenSSL curve NID
+    unsigned fieldBits = 0;    // EC only: bits reserved for each affine coordinate
 };
 
 /**
@@ -103,6 +235,7 @@ template <> struct BatchShare<VerificationMode::Pedersen> {
 struct VPSSConfig {
     // VerificationMode vssType;
     PaddingMode padType;
+    bool deterministicRand = false;
     size_t t;                // Privacy threshold (reconstruction requires t shares)
     size_t k;                // Number of packed secrets
     size_t N;                // Total number of shares to generate
@@ -154,6 +287,29 @@ public:
         };
         thread_local ThreadLocalGenerator localGen;
         return localGen.engine.get_z_range(limit);
+    }
+
+    // --- commitment-group operations; the only place the backend matters ----------
+    static BigInt groupIdentity(const PublicParameters& params) {
+        return params.groupType == GroupType::ZP ? BigInt(1) : BigInt(0);
+    }
+
+    static BigInt groupExp(const PublicParameters& params, const BigInt& base, const BigInt& e) {
+        if (params.groupType == GroupType::ZP) return modPow(base, e, params.p);
+#ifdef VPSS_WITH_EC
+        return ecbackend::exp(params.curveNid, params.fieldBits, base, e);
+#else
+        throw std::runtime_error("EC backend not compiled in (rebuild with VPSS_WITH_EC)");
+#endif
+    }
+
+    static BigInt groupMul(const PublicParameters& params, const BigInt& a, const BigInt& b) {
+        if (params.groupType == GroupType::ZP) return (a * b) % params.p;
+#ifdef VPSS_WITH_EC
+        return ecbackend::mul(params.curveNid, params.fieldBits, a, b);
+#else
+        throw std::runtime_error("EC backend not compiled in (rebuild with VPSS_WITH_EC)");
+#endif
     }
 
     static BigInt modPow(const BigInt& base, const BigInt& exp, const BigInt& mod) {
@@ -857,10 +1013,53 @@ public:
             throw std::invalid_argument("Vector sizes must be equal.");
         }
 
-        #pragma omp parallel for
-        for (long long index = 0; index < static_cast<long long>(vectorA.size()); ++index) {
-            mpz_add(vectorA[index].get_mpz_t(), vectorA[index].get_mpz_t(), vectorB[index].get_mpz_t());
-            mpz_mod(vectorA[index].get_mpz_t(), vectorA[index].get_mpz_t(), mod.get_mpz_t());
+        // [B7] The product / sum is written into a per-thread scratch mpz and only the reduced
+        // result goes back into the destination. Writing the wider intermediate into the
+        // destination itself made GMP reallocate that element on every iteration, and the
+        // allocator lock then serialised the parallel loop: with a 9-limb modulus, adding a
+        // second thread made this loop SLOWER rather than faster. The scratch is allocated
+        // once per thread, wide enough for the intermediate, so nothing reallocates inside.
+        const size_t scratch_bits = mpz_sizeinbase(mod.get_mpz_t(), 2) + 128;
+        // [B7] Give every destination element room for a full residue BEFORE going parallel.
+        // A share vector holds values of mixed width -- when k equals t the polynomial carries
+        // no random coefficient, so some evaluations are only a few limbs wide -- and writing a
+        // full-width residue into a narrow element reallocates it. Inside the parallel loop
+        // that reallocation takes the allocator lock and makes the loop slower with more
+        // threads than with one. Doing it here is serial, once per vector, and allocation-free
+        // for elements that are already wide enough.
+        const size_t n_elements = vectorA.size();
+        const size_t mod_bits = mpz_sizeinbase(mod.get_mpz_t(), 2);
+        const size_t mod_limbs = (mod_bits + GMP_NUMB_BITS - 1) / GMP_NUMB_BITS;
+        for (size_t index = 0; index < vectorA.size(); ++index) {
+            if (mpz_size(vectorA[index].get_mpz_t()) < mod_limbs) {
+                mpz_realloc2(vectorA[index].get_mpz_t(), mod_bits + GMP_NUMB_BITS);
+            }
+        }
+
+#ifdef _OPENMP
+        const long long CHUNK = std::max<long long>(
+            256, static_cast<long long>(n_elements) / (8LL * omp_get_max_threads()));
+#else
+        const long long CHUNK = 256;
+#endif
+
+        #pragma omp parallel
+        {
+            mpz_t scratch;
+            mpz_init2(scratch, scratch_bits);
+            // [B7] Dynamic schedule with a chunk sized from the actual work. When k equals t
+            // the polynomial carries no random coefficient, so a share vector mixes narrow and
+            // full-width values and a static split stalls on the heavy chunk. A fixed chunk is
+            // the wrong answer though: it has to be small enough that there are several chunks
+            // per thread (otherwise dynamic behaves like static) and large enough that handing
+            // one out costs less than doing it (otherwise the uniform case pays for nothing).
+            // Aiming at 8 chunks per thread, floored at 256, satisfies both.
+            #pragma omp for schedule(dynamic, CHUNK)
+            for (long long index = 0; index < static_cast<long long>(vectorA.size()); ++index) {
+                mpz_add(scratch, vectorA[index].get_mpz_t(), vectorB[index].get_mpz_t());
+                mpz_mod(vectorA[index].get_mpz_t(), scratch, mod.get_mpz_t());
+            }
+            mpz_clear(scratch);
         }
     }
 
@@ -872,10 +1071,49 @@ public:
      */
     static void scaleVector(std::vector<BigInt>& vector, const BigInt& scalar, const BigInt& mod) {
 
-        #pragma omp parallel for
-        for (long long index = 0; index < static_cast<long long>(vector.size()); ++index) {
-            mpz_mul(vector[index].get_mpz_t(), vector[index].get_mpz_t(), scalar.get_mpz_t());
-            mpz_mod(vector[index].get_mpz_t(), vector[index].get_mpz_t(), mod.get_mpz_t());
+        // [B7] Same reason as addVectors: keep the wide intermediate out of the destination.
+        const size_t scratch_bits = mpz_sizeinbase(mod.get_mpz_t(), 2)
+                                  + mpz_sizeinbase(scalar.get_mpz_t(), 2) + 128;
+        // [B7] Give every destination element room for a full residue BEFORE going parallel.
+        // A share vector holds values of mixed width -- when k equals t the polynomial carries
+        // no random coefficient, so some evaluations are only a few limbs wide -- and writing a
+        // full-width residue into a narrow element reallocates it. Inside the parallel loop
+        // that reallocation takes the allocator lock and makes the loop slower with more
+        // threads than with one. Doing it here is serial, once per vector, and allocation-free
+        // for elements that are already wide enough.
+        const size_t n_elements = vector.size();
+        const size_t mod_bits = mpz_sizeinbase(mod.get_mpz_t(), 2);
+        const size_t mod_limbs = (mod_bits + GMP_NUMB_BITS - 1) / GMP_NUMB_BITS;
+        for (size_t index = 0; index < vector.size(); ++index) {
+            if (mpz_size(vector[index].get_mpz_t()) < mod_limbs) {
+                mpz_realloc2(vector[index].get_mpz_t(), mod_bits + GMP_NUMB_BITS);
+            }
+        }
+
+#ifdef _OPENMP
+        const long long CHUNK = std::max<long long>(
+            256, static_cast<long long>(n_elements) / (8LL * omp_get_max_threads()));
+#else
+        const long long CHUNK = 256;
+#endif
+
+        #pragma omp parallel
+        {
+            mpz_t scratch;
+            mpz_init2(scratch, scratch_bits);
+            // [B7] Dynamic schedule with a chunk sized from the actual work. When k equals t
+            // the polynomial carries no random coefficient, so a share vector mixes narrow and
+            // full-width values and a static split stalls on the heavy chunk. A fixed chunk is
+            // the wrong answer though: it has to be small enough that there are several chunks
+            // per thread (otherwise dynamic behaves like static) and large enough that handing
+            // one out costs less than doing it (otherwise the uniform case pays for nothing).
+            // Aiming at 8 chunks per thread, floored at 256, satisfies both.
+            #pragma omp for schedule(dynamic, CHUNK)
+            for (long long index = 0; index < static_cast<long long>(vector.size()); ++index) {
+                mpz_mul(scratch, vector[index].get_mpz_t(), scalar.get_mpz_t());
+                mpz_mod(vector[index].get_mpz_t(), scratch, mod.get_mpz_t());
+            }
+            mpz_clear(scratch);
         }
     }
 };
@@ -930,7 +1168,7 @@ public:
         }
 
         for (size_t i = config.k; i < config.t; ++i) {
-            BigInt randVal = MathHelper::randomBigInt(params.q);
+            BigInt randVal = config.deterministicRand ? BigInt(0) : MathHelper::randomBigInt(params.q);
             points.push_back({ config.secretIndices[i], randVal });
         }
 
@@ -993,11 +1231,11 @@ public:
         outCommitments.clear();
         if constexpr (Mode != VerificationMode::None) {
             for (size_t t = 0; t < polyF.size(); ++t) {
-                BigInt g_a = MathHelper::modPow(params.g, polyF[t], params.p);
+                BigInt g_a = MathHelper::groupExp(params, params.g, polyF[t]);
                 BigInt commitment = g_a;
                 if constexpr (Mode == VerificationMode::Pedersen) {
-                    BigInt h_r = MathHelper::modPow(params.h, polyR[t], params.p);
-                    commitment = (commitment * h_r) % params.p;
+                    BigInt h_r = MathHelper::groupExp(params, params.h, polyR[t]);
+                    commitment = MathHelper::groupMul(params, commitment, h_r);
                 }
                 outCommitments.push_back(commitment);
             }
@@ -1019,17 +1257,17 @@ public:
 
         // Check: g^s * h^r == Product( C_i ^ (x^i) )
 
-        BigInt lhs = MathHelper::modPow(params.g, share.s, params.p);
+        BigInt lhs = MathHelper::groupExp(params, params.g, share.s);
         if constexpr (Mode == VerificationMode::Pedersen) {
-            BigInt h_r = MathHelper::modPow(params.h, share.r, params.p);
-            lhs = (lhs * h_r) % params.p;
+            BigInt h_r = MathHelper::groupExp(params, params.h, share.r);
+            lhs = MathHelper::groupMul(params, lhs, h_r);
         }
 
-        BigInt rhs = 1;
+        BigInt rhs = MathHelper::groupIdentity(params);
         BigInt x_pow = 1;
         for (const auto& C : commitments) {
-            BigInt term = MathHelper::modPow(C, x_pow, params.p);
-            rhs = (rhs * term) % params.p;
+            BigInt term = MathHelper::groupExp(params, C, x_pow);
+            rhs = MathHelper::groupMul(params, rhs, term);
             x_pow = (x_pow * share.x) % params.q;
         }
         return lhs == rhs;

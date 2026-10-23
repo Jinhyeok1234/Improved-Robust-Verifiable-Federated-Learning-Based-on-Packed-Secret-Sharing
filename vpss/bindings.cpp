@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <cstring>
 
 #include "VPSS.cpp" 
 
@@ -31,10 +32,18 @@ public:
     Serializer() : oss(std::ios::binary) {}
 
     void write_bigint(const BigInt& n) {
-        std::string s = n.get_str(16);
-        uint32_t len = static_cast<uint32_t>(s.size());
+        // [B1] Raw big-endian magnitude with a sign byte and a length prefix.
+        // The previous encoding wrote the value as a hexadecimal ASCII string, so every
+        // field element took two bytes per byte of value: a 512-bit residue went on the
+        // wire as 128 characters plus a 4-byte length (132 bytes) instead of 69.
+        uint8_t sign_byte = (mpz_sgn(n.get_mpz_t()) < 0) ? 1 : 0;
+        size_t byte_count = 0;
+        std::vector<unsigned char> buf((mpz_sizeinbase(n.get_mpz_t(), 2) + 7) / 8 + 1);
+        mpz_export(buf.data(), &byte_count, 1, 1, 1, 0, n.get_mpz_t());
+        uint32_t len = static_cast<uint32_t>(byte_count);
+        oss.write(reinterpret_cast<const char*>(&sign_byte), 1);
         oss.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        oss.write(s.data(), len);
+        if (len > 0) oss.write(reinterpret_cast<const char*>(buf.data()), len);
     }
 
     template <typename T>
@@ -114,15 +123,22 @@ public:
     Deserializer(const std::string& s) : data(s), pos(0) {}
 
     BigInt read_bigint() {
-        if (pos + sizeof(uint32_t) > data.size()) throw std::runtime_error("Stream too short");
+        // [B1] counterpart of write_bigint: sign byte, length, big-endian magnitude.
+        if (pos + 1 + sizeof(uint32_t) > data.size()) throw std::runtime_error("Stream too short");
+        uint8_t sign_byte = static_cast<uint8_t>(data[pos]);
+        pos += 1;
         uint32_t len;
         std::memcpy(&len, &data[pos], sizeof(len));
         pos += sizeof(len);
 
         if (pos + len > data.size()) throw std::runtime_error("Stream too short for BigInt body");
-        std::string s = data.substr(pos, len);
+        BigInt out(0);
+        if (len > 0) {
+            mpz_import(out.get_mpz_t(), len, 1, 1, 1, 0, &data[pos]);
+        }
         pos += len;
-        return BigInt(s, 16); // Hex parse
+        if (sign_byte) out = -out;
+        return out;
     }
 
     std::vector<BigInt> read_vector_bigint() {
@@ -410,18 +426,106 @@ PYBIND11_MODULE(vpss_module, m) {
     // -------------------------------------------------------------------------
     // Structures
     // -------------------------------------------------------------------------
+    py::enum_<GroupType>(m, "GroupType")
+        .value("ZP", GroupType::ZP)
+        .value("EC", GroupType::EC)
+        .export_values();
+
     py::class_<PublicParameters>(m, "PublicParameters")
         .def(py::init<>())
         .def_readwrite("p", &PublicParameters::p)
         .def_readwrite("q", &PublicParameters::q)
         .def_readwrite("g", &PublicParameters::g)
-        .def_readwrite("h", &PublicParameters::h);
+        .def_readwrite("h", &PublicParameters::h)
+        .def_readwrite("groupType", &PublicParameters::groupType)
+        .def_readwrite("curveNid", &PublicParameters::curveNid)
+        .def_readwrite("fieldBits", &PublicParameters::fieldBits);
+
+    m.attr("HAS_EC") =
+#ifdef VPSS_WITH_EC
+        true;
+#else
+        false;
+#endif
+
+#ifdef VPSS_WITH_EC
+    m.def("ec_setup", [](const std::string& curve) {
+        int nid;
+        if (curve == "P-256" || curve == "secp256r1" || curve == "prime256v1")
+            nid = NID_X9_62_prime256v1;
+        else if (curve == "P-384" || curve == "secp384r1")
+            nid = NID_secp384r1;
+        else if (curve == "P-521" || curve == "secp521r1")
+            nid = NID_secp521r1;
+        else
+            throw std::invalid_argument("unsupported curve: " + curve);
+
+        const EC_GROUP* grp = ecbackend::group(nid);
+        BN_CTX* c = ecbackend::ctx();
+
+        BIGNUM* pf = BN_new();
+        BIGNUM* ca = BN_new();
+        BIGNUM* cb = BN_new();
+        if (!EC_GROUP_get_curve(grp, pf, ca, cb, c)) {
+            BN_free(pf); BN_free(ca); BN_free(cb);
+            throw std::runtime_error("EC_GROUP_get_curve failed");
+        }
+        unsigned fieldBits = static_cast<unsigned>(((BN_num_bits(pf) + 7) / 8) * 8);
+        BigInt fieldPrime = ecbackend::fromBn(pf);
+        BN_free(ca); BN_free(cb);
+
+        BigInt order = ecbackend::fromBn(EC_GROUP_get0_order(grp));
+        BigInt G = ecbackend::encode(nid, fieldBits, EC_GROUP_get0_generator(grp));
+
+        // h is derived by hashing a fixed string, so nobody -- including whoever generates
+        // the parameters -- knows log_g(h). Pedersen binding rests on that.
+        size_t fieldBytes = static_cast<size_t>((BN_num_bits(pf) + 7) / 8);
+        BigInt H(0);
+        bool found = false;
+        for (int i = 0; i < 4096 && !found; ++i) {
+            std::vector<unsigned char> stream;
+            for (int blk = 0; stream.size() < fieldBytes; ++blk) {
+                std::string msg = "RVFL-pedersen-h|" + curve + "|" + std::to_string(i) +
+                                  "|" + std::to_string(blk);
+                unsigned char digest[SHA256_DIGEST_LENGTH];
+                SHA256(reinterpret_cast<const unsigned char*>(msg.data()), msg.size(), digest);
+                stream.insert(stream.end(), digest, digest + SHA256_DIGEST_LENGTH);
+            }
+            BigInt x(0);
+            mpz_import(x.get_mpz_t(), fieldBytes, 1, 1, 1, 0, stream.data());
+            x = x % fieldPrime;
+            BIGNUM* xb = ecbackend::toBn(x);
+            ecbackend::Point pt(grp);
+            int ok = EC_POINT_set_compressed_coordinates(grp, pt.p, xb, 0, c);
+            BN_free(xb);
+            if (ok && EC_POINT_is_on_curve(grp, pt.p, c) && !EC_POINT_is_at_infinity(grp, pt.p)) {
+                H = ecbackend::encode(nid, fieldBits, pt.p);
+                found = true;
+            }
+        }
+        BN_free(pf);
+        if (!found) throw std::runtime_error("failed to derive h");
+
+        py::dict out;
+        out["nid"] = nid;
+        out["field_bits"] = fieldBits;
+        out["p"] = fieldPrime;
+        out["q"] = order;
+        out["g"] = G;
+        out["h"] = H;
+        return out;
+    },
+    py::arg("curve"),
+    "Curve parameters for the EC commitment backend. curve is P-256, P-384 or P-521.");
+#endif
+
 
     py::class_<VPSSConfig>(m, "VPSSConfig")
         .def(py::init<>())
         .def_readwrite("t", &VPSSConfig::t)
         .def_readwrite("k", &VPSSConfig::k)
         .def_readwrite("N", &VPSSConfig::N)
+        .def_readwrite("deterministicRand", &VPSSConfig::deterministicRand)
         .def_readwrite("padType", &VPSSConfig::padType)
         .def_readwrite("secretIndices", &VPSSConfig::secretIndices)
         .def_readwrite("shareIndices", &VPSSConfig::shareIndices);

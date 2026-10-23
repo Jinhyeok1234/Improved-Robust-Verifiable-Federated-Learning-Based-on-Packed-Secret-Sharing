@@ -19,6 +19,28 @@ else:  # Linux/macOS
     link_args = ["-fopenmp"]
     libraries = ["gmp", "gmpxx"]
 
+# The elliptic-curve commitment backend is compiled only when the OpenSSL headers are
+# present. Set VPSS_WITH_EC=0 to force it off, or =1 to force it on (e.g. when the headers
+# live somewhere this check does not look).
+def _openssl_present():
+    forced = os.environ.get("VPSS_WITH_EC")
+    if forced == "0":
+        return False
+    if forced == "1":
+        return True
+    candidates = [GMP_INCLUDE_DIR, "/usr/include", "/usr/local/include",
+                  "/opt/homebrew/include", "/opt/local/include"]
+    return any(os.path.exists(os.path.join(d, "openssl", "ec.h")) for d in candidates)
+
+WITH_EC = _openssl_present()
+if WITH_EC:
+    compile_args.append("/DVPSS_WITH_EC" if os.name == "nt" else "-DVPSS_WITH_EC")
+    libraries += ["libcrypto"] if os.name == "nt" else ["crypto"]
+    print("[setup] elliptic-curve backend: ENABLED")
+else:
+    print("[setup] elliptic-curve backend: disabled (OpenSSL headers not found); "
+          "the Z_p backend still builds")
+
 ext_modules = [
     Extension(
         "vpss_module",

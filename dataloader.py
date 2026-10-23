@@ -10,63 +10,74 @@ import gc
 
 class PoisoningConfig:
     """
-    dummy class for poisoning attack
+    Configuration for a client-side poisoning attack.
+
+    poison_type:
+      - 'label_flip_fltrust' : FLTrust-style label flipping, l -> num_classes-1-l
+                               (applied to every training example; no target_label needed).
+      - 'backdoor'           : stamp a trigger pattern and set label to target_label.
     """
-    def __init__(self, 
-                 poison_type: str = 'label_flip', 
+    def __init__(self,
+                 poison_type: str = 'label_flip_fltrust',
                  target_label: Optional[int] = None,
-                 source_labels: Optional[List[int]] = None,
                  poison_rate: float = 1.0,
+                 num_classes: int = 10,
                  backdoor_pattern: Optional[Dict] = None):
         self.poison_type = poison_type
         self.target_label = target_label
-        self.source_labels = source_labels
         self.poison_rate = poison_rate
-        
+        self.num_classes = num_classes
+
         if backdoor_pattern is None and poison_type == 'backdoor':
             self.backdoor_pattern = {'pos': (-3, -3), 'size': (3, 3), 'color': 1.0}
         else:
             self.backdoor_pattern = backdoor_pattern
 
-        if self.target_label is None:
-            raise ValueError("공격을 위해서는 target_label 설정이 필수입니다.")
+        # target_label is required only for backdoor.
+        if poison_type == 'backdoor' and self.target_label is None:
+            raise ValueError("poison_type='backdoor' requires target_label.")
 
 class PoisonedDataset(Dataset):
-    def __init__(self, dataset: Dataset, indices: List[int], config: PoisoningConfig):
+    def __init__(self, dataset: Dataset, config: PoisoningConfig):
         self.dataset = dataset
         self.config = config
 
     def __len__(self):
-        return len(self.indices)
+        return len(self.dataset)
 
     def _apply_backdoor(self, data: torch.Tensor) -> torch.Tensor:
         pattern = self.config.backdoor_pattern
         if pattern is None: return data
-        
+
         pos_x, pos_y = pattern['pos']
         size_w, size_h = pattern['size']
         color = pattern['color']
-        
+
+        # pos taken modulo H/W so a negative pos (e.g. -3) maps to the bottom/right corner.
+        # (The old code used the raw slice pos_y:pos_y+size_h; with pos_y=-3,size_h=3 that is
+        #  [-3:0] == EMPTY, so the trigger was never stamped -- the backdoor did nothing.)
+        H, W = data.shape[-2], data.shape[-1]
+        py, px = pos_y % H, pos_x % W
+
         poisoned_data = data.clone()
-        poisoned_data[:, pos_y:pos_y+size_h, pos_x:pos_x+size_w] = color
+        poisoned_data[:, py:py+size_h, px:px+size_w] = color
         return poisoned_data
 
     def __getitem__(self, index):
         data, target = self.dataset[index]
+        target = int(target)
 
         if np.random.random() < self.config.poison_rate:
-            
-            if self.config.poison_type == 'label_flip':
-                if self.config.source_labels is None or target in self.config.source_labels:
-                    target = self.config.target_label
+
+            if self.config.poison_type == 'label_flip_fltrust':
+                # FLTrust label flipping: l -> M - 1 - l
+                target = self.config.num_classes - 1 - target
 
             elif self.config.poison_type == 'backdoor':
                 data = self._apply_backdoor(data)
                 target = self.config.target_label
 
-        if not isinstance(target, torch.Tensor):
-             target = torch.tensor(target, dtype=torch.long)
-             
+        target = torch.tensor(target, dtype=torch.long)
         return data, target
 
 class CustomDataLoader:
