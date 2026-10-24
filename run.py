@@ -177,6 +177,8 @@ def finalize(p):
         raise SystemExit(f"{p['name']}: cost protocol must be 'rvfl' or 'brea'")
     if kind == "train" and p["protocol"] not in ("rvfl", "fltrust"):
         raise SystemExit(f"{p['name']}: train protocol must be 'rvfl' or 'fltrust'")
+    if kind == "cost" and p["protocol"] == "brea" and p["k1"] != 1:
+        raise SystemExit(f"{p['name']}: BREA packs nothing; leave k1 out (it is 1)")
     if kind in ("cost", "e2e"):
         if p["filter"] not in FILTERS:
             raise SystemExit(f"{p['name']}: filter must be one of {FILTERS}")
