@@ -1,0 +1,47 @@
+# Accuracy without attack, RVFL against plaintext FLTrust (appendix figures "accuracy
+# comparison" and "cosine similarities"). The RVFL runs compute the protocol's aggregation in
+# the clear (rvfl.baselines.rvfl_plaintext_aggregate), which gives the protocol's model without
+# its per-round cryptographic cost. Larger N gives each client less data, so it trains longer.
+#
+#   python run.py experiments/accuracy.toml
+#   python make_artifacts.py figures --only accuracy cosine
+
+[[run]]
+name = "accuracy"
+kind = "train"
+protocol = ["rvfl", "fltrust"]
+n = 10
+rounds = 600
+eval_every = 10
+
+[[run]]
+name = "accuracy"
+kind = "train"
+protocol = ["rvfl", "fltrust"]
+n = 20
+rounds = 750
+eval_every = 10
+
+[[run]]
+name = "accuracy"
+kind = "train"
+protocol = ["rvfl", "fltrust"]
+n = 30
+rounds = 900
+eval_every = 10
+
+[[run]]
+name = "accuracy"
+kind = "train"
+protocol = ["rvfl", "fltrust"]
+n = 40
+rounds = 1050
+eval_every = 10
+
+[[run]]
+name = "accuracy"
+kind = "train"
+protocol = ["rvfl", "fltrust"]
+n = 50
+rounds = 1200
+eval_every = 10

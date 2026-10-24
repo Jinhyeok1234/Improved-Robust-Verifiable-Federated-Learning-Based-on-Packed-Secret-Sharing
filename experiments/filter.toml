@@ -1,0 +1,28 @@
+# The per-round participant filter (rvfl.filtering). Not part of the paper's experiments; an
+# example of the settings. The optimal_nk entries need a cost model built from end-to-end runs
+# without the filter (python -m rvfl.filtering fit ...).
+#
+#   sudo -E "$(which python)" run.py experiments/filter.toml
+#   python make_artifacts.py figures --only filter --filter-runs runs/filter
+
+[[run]]
+name = "filter"
+kind = "e2e"
+n = 48
+k1 = 1
+alpha = 0.2
+filter = ["none", "max", "max_variable_k"]
+link = "10000:0.2"
+rounds = 20
+
+# [[run]]
+# name = "filter"
+# kind = "e2e"
+# n = 48
+# k1 = 1
+# alpha = 0.2
+# filter = "optimal_nk"
+# threshold = ["n_over_3", "lower_bound"]
+# cost_model = "cost_model.json"
+# link = "10000:0.2"
+# rounds = 20

@@ -1,0 +1,50 @@
+# Computation time and communication of the protocol, every party in one process (tables
+# "measured costs by N", "measured costs by k1", "communication breakdown" and the comparison
+# with BREA). 6 rounds each; the tables leave the first round out.
+#
+#   LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 python run.py experiments/cost.toml
+#   python make_artifacts.py tables
+
+# t = k: the largest packing, k1 = t1 = N // 3
+[[run]]
+name = "cost"
+kind = "cost"
+protocol = "rvfl"
+n = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+k1 = "t"
+
+[[run]]
+name = "cost"
+kind = "cost"
+protocol = "rvfl"
+n = 50
+k1 = [1, 2, 4, 8]
+
+[[run]]
+name = "cost"
+kind = "cost"
+protocol = "rvfl"
+n = 100
+k1 = [8, 16, 32]
+
+[[run]]
+name = "cost"
+kind = "cost"
+protocol = "rvfl"
+n = [10, 20, 30, 40]
+k1 = 1
+
+# BREA commits to every one of the M coordinates with Pedersen commitments, which takes hours
+# per round from N = 20 on, so it runs fewer rounds there.
+[[run]]
+name = "cost"
+kind = "cost"
+protocol = "brea"
+n = 10
+
+[[run]]
+name = "cost"
+kind = "cost"
+protocol = "brea"
+n = [20, 30, 40]
+rounds = 1

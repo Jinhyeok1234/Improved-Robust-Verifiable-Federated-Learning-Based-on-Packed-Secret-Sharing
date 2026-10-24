@@ -1,0 +1,12 @@
+# Wall-clock rounds over emulated links, one process per party in its own network namespace
+# (tables "LAN end-to-end" and "WAN end-to-end"). Needs root:
+#
+#   sudo -E LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 "$(which python)" run.py experiments/e2e.toml
+#   python make_artifacts.py tables
+
+[[run]]
+name = "e2e"
+kind = "e2e"
+n = [10, 20, 30, 40, 50]
+k1 = "doubling"
+link = ["10000:0.2", "1000:0.2", "100:80", "50:80", "10:80"]

@@ -1,0 +1,12 @@
+# Cost of the VPSS primitives per commitment curve (appendix table "elliptic-curve
+# parameters"). P-256 = level 128, P-384 = 192, P-521 = 256.
+#
+#   LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 python run.py experiments/curve_bench.toml
+#   python make_artifacts.py tables --only curves
+
+[[run]]
+name = "curves"
+kind = "curve_bench"
+n = [10, 50, 100]
+k1 = "doubling"
+level = ["128", "192", "256"]

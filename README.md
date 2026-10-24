@@ -1,110 +1,125 @@
 # Improved Robust Verifiable Federated Learning Based on Packed Secret Sharing
 
-[![Conference](https://img.shields.io/badge/NeurIPS-2026-blue.svg)](https://neurips.cc/)
-[![Status](https://img.shields.io/badge/Status-Ready-brightgreen.svg)]()
-[![License](https://img.shields.io/badge/License-Private-red.svg)]()
+Code of the NeurIPS 2026 paper *Improved Robust Verifiable Federated Learning Based on Packed
+Secret Sharing* (RVFL). RVFL aggregates client updates with FLTrust's cosine trust scores while
+the updates stay secret-shared: each client deals packed shares of the component of its update
+perpendicular to the server's root update, the clients verify each other's dot-product shares
+with Pedersen-committed second-level shares, and the server reconstructs only the two dot
+products per client and the weighted aggregate.
 
-This repository contains the official implementation of **RVFL (Robust Verifiable Federated Learning)**. This project optimizes degree reduction efficiency in Verifiable Packed Secret Sharing (VPSS) and integrates it with a Byzantine-robust Federated Learning framework (FLTrust) to defend against both inference and Byzantine attacks.
+## Layout
 
----
-
-## 1. Project Overview
-
-- **Optimized Degree Reduction**
-  - Re-engineered VPSS primitives in C++ to reduce computational overhead in Byzantine-robust settings.
-- **Robust Aggregation**
-  - Integration with FLTrust to ensure robustness against malicious model updates.
-- **Privacy Preservation**
-  - Utilizes Packed Secret Sharing (PSS) to protect local updates from inference attacks.
-- **Multi-Protocol Support**
-  - Includes implementations for `RVFL`, `FLTrust`, `BREA`, and `FedAvg` for benchmarking.
-
----
-
-## 2. Directory Structure
 ```text
 .
-├── vpss/                  # Core VPSS C++ Implementation & Python Bindings
-│   ├── VPSS.cpp           # VPSS primitive logic
-│   ├── bindings.cpp       # Pybind11 interface
-│   └── setup.py           # Build script for the extension
-├── dataloader.py          # Data loading logic with poisoning hooks
-├── dataset_partitioner.py # Dataset splitting for IID/Non-IID settings
-├── models.py              # Model definitions (Primary: ResNet20)
-├── party.py               # FL Party (Server/Client) behaviors
-├── trainer.py             # Local training and global update application
-├── main.py                # Main experiment entry point
-└── requirements.txt       # Software dependencies
+├── vpss/                 C++ VPSS primitives (GMP, OpenSSL elliptic curves) and Python bindings
+├── rvfl/                 the protocol and everything around it
+│   ├── party.py          server and clients of the RVFL protocol, phase by phase
+│   ├── baselines.py      plaintext FLTrust, RVFL's aggregation in the clear, BREA
+│   ├── filtering.py      optional per-round participant filter (not used in the paper)
+│   ├── comms.py          in-process and TCP transports, compute lock of the end-to-end run
+│   ├── testbed.py        network namespaces with tc-shaped links
+│   ├── worker.py         one party of the end-to-end run, as its own process
+│   ├── experiment.py     seeding, VPSS configurations, round drivers
+│   ├── crypto_params.py  commitment groups (NIST curves; the Schnorr groups are legacy)
+│   ├── curve_bench.py    per-curve timing of the VPSS primitives
+│   ├── attacks.py        poisoning attacks (LF, Trim, Krum, Adaptive, Scaling)
+│   ├── data.py, models.py, trainer.py, logs.py
+├── run.py                runs the experiments listed in a TOML file
+├── experiments/          the experiment lists of the paper
+├── make_artifacts.py     the paper's tables and figures from the run folders
+└── results/              the measurements behind the paper, in run.py's folder layout
 ```
 
----
+## Requirements
 
-## 3. Getting Started
+- Linux, Python 3.11 or later (the paper used Python 3.12.3, GCC 13.3.0, Ubuntu 24.04)
+- GMP (`libgmp-dev`) and OpenSSL headers (`libssl-dev`) for the VPSS extension
+- `pip install -r requirements.txt`
+- End-to-end runs only: root, `iproute2` with the `netem` queueing discipline
+- The paper's timings were taken with jemalloc preloaded (`libjemalloc2`), see below
 
-### Hardware & Software Requirements
-- **OS**: Ubuntu 24.04.4 LTS
-- **GPU**: NVIDIA RTX A6000 (CUDA 12.x recommended)
-- **Compiler**: GCC 13.3.0
-- **Python**: Version 3.12.3 with PyTorch 2.10.0
+Build the extension and put it next to `run.py`:
 
-### Installation & Build
-- **Install Dependencies**
-  - `pip install -r requirements.txt`
-- **Build C++ Extension**
-  - `cd vpss`
-  - `python setup.py build_ext --inplace`
-  - `cp *.so ../` (Copy the compiled library to the root directory)
-  - `cd ..`
-
-### Mandatory Directory Setup
-**Warning**: The script requires specific output directories to exist. Please create them manually before running the experiments:
 ```bash
-mkdir -p dataset partitions checkpoints logs/RVFL logs/FLTrust logs/BREA logs/FedAvg
+cd vpss
+python setup.py build_ext --inplace
+cp vpss_module*.so ..
+cd ..
 ```
 
----
+`setup.py` enables the elliptic-curve backend when it finds the OpenSSL headers (it prints
+which); every experiment uses it.
 
-## 4. Usage
+## Running experiments
 
-### Configuration
-- You can modify the following parameters in `main.py`:
-  - `MODE`: Select protocol (`RVFL`, `FLTrust`, `BREA`, `FedAvg`)
-  - `N`: Total number of clients (Default: 40)
-  - `NUM_ITERATIONS`: Training rounds
-  - `use_perp`: Toggle perpendicular vector quantization (RVFL only)
+An experiment list is a TOML file of `[[run]]` entries. A setting given as a list is varied, and
+the entry expands into one point per combination:
 
-### Execution
+```toml
+[[run]]
+name = "cost"
+kind = "cost"            # train | cost | e2e | curve_bench
+protocol = "rvfl"
+n = [10, 20]             # two points
+k1 = "t"                 # k1 = t1 = N // 3
+```
+
 ```bash
-python main.py
+python run.py experiments/cost.toml              # every point; finished ones are skipped
+python run.py experiments/cost.toml --list       # the points and whether they are done
+python run.py experiments/attacks.toml --jobs 4 --gpus 0 1
 ```
 
----
+Each point writes a folder `runs/<name>/<point>/` with its settings (`config.json`), its status,
+and its measurements (`rvfl/logs.py` lists the files). Every setting and its default is described
+at the top of `run.py`. The kinds:
 
-## 5. Experiment Logs & Checkpoints
+- `train`: accuracy under attack. RVFL's aggregation is computed in the clear
+  (`rvfl.baselines`); it produces the protocol's model without the cryptographic cost per round.
+- `cost`: computation time and bytes sent by every party, all parties in one process.
+- `e2e`: wall-clock rounds over emulated links, one process per party, each in its own network
+  namespace with its link shaped by `tc`. Needs root. Local computation is serialized across the
+  parties (one machine plays all of them) and excluded from the communication timers.
+- `curve_bench`: the VPSS primitives timed per elliptic curve.
 
-- **Checkpoints**
-  - Stored in `./checkpoints/`
-  - Pattern: `{DATASET}_{MODEL}_N{N}_Iter{n}.pt`
-- **Performance Logs**
-  - Generated in `./logs/{MODE}/` as `.jsonl` files
-  - `*_processing_time_log.jsonl`: Computation time breakdown
-  - `*_communication_cost_log.jsonl`: Network overhead in bytes
-  - `*_values_log.jsonl`: Aggregation values and metrics
+`seed` (default 0) fixes the data split, the initial model, and every local training (one seed
+per round and party), so a point run twice gives the same model.
 
----
+`--jobs` runs several `train` points at once; timing points always run one at a time.
 
-## 6. Implementation Details
+Timings in the paper were measured with jemalloc:
 
-- **Cryptographic Settings**
-  - Uses 512-bit prime field parameters for secure multi-party computation.
-- **Simulation Environment**
-  - Parties communicate via local loopback (127.0.0.1) for accurate cost measurement.
-- **Data Partitioning**
-  - `dataset_partitioner.py` handles the distribution logic for the server-side proxy dataset and client-side indices.
+```bash
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 python run.py experiments/cost.toml
+sudo -E LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 "$(which python)" run.py experiments/e2e.toml
+```
 
----
+## Reproducing the paper
 
-## 7. Anonymous Submission Note
+| Artifact | Experiments | Make it |
+|---|---|---|
+| Accuracy comparison, cosine dynamics | `experiments/accuracy.toml` | `python make_artifacts.py figures --only accuracy cosine` |
+| Attack sweep, Scaling attack | `experiments/attacks.toml` | `python make_artifacts.py figures --only attack_sweep scaling` |
+| Measured costs by N and by k1, comparison with BREA | `experiments/cost.toml` | `python make_artifacts.py tables --only cost_n cost_k1 brea` |
+| LAN / WAN end-to-end, communication breakdown | `experiments/e2e.toml` | `python make_artifacts.py tables --only e2e_lan e2e_wan comm_breakdown` |
+| Elliptic-curve parameters | `experiments/curve_bench.toml` | `python make_artifacts.py tables --only curves` |
 
-This repository is configured for anonymous review (NeurIPS 2026). All institutional affiliations and author names have been removed. The anonymous version of the repository is maintained at:
-[https://anonymous.4open.science/r/Improved-Robust-Verifiable-Federated-Learning-Based-on-Packed-Secret-Sharing-8001/](https://anonymous.4open.science/r/Improved-Robust-Verifiable-Federated-Learning-Based-on-Packed-Secret-Sharing-8001/)
+Tables are written as LaTeX by default (`--format latex csv md` for the others), figures as PDF
+(`--fmt pdf png`), into `artifacts/`. The cost and end-to-end tables leave out each point's first
+round (connection set-up and first allocations; `--drop-first`).
+
+The measurements behind the paper are in `results/`, in the same layout (the per-party logs
+gzip-compressed), so the artifacts can be made from them directly:
+
+```bash
+python make_artifacts.py tables --runs results
+python make_artifacts.py figures --runs results
+```
+
+## Participant filter
+
+`rvfl/filtering.py` implements an optional filter that drops the clients with a non-positive
+cosine from a round (they would contribute zero to the aggregate) and rebuilds the sharing for
+the remaining participants. It is not part of the paper's experiments; `experiments/filter.toml`
+shows its settings, and `python make_artifacts.py figures --only filter` plots its rounds against
+the filter-off points of the same N and link.

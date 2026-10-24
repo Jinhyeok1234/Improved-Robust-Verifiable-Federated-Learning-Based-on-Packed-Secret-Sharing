@@ -1,0 +1,77 @@
+# Robustness under poisoning attacks, RVFL against plaintext FLTrust (appendix figures "attack
+# sweep" and "scaling attack"). The malicious clients are the first floor(N * malicious_rate)
+# ones, and every round is evaluated. The number of rounds is the one at which the run without
+# attack reaches a test error of 0.2: 1,000 rounds at N = 30 and 2,500 at N = 100.
+#
+#   python run.py experiments/attacks.toml --jobs 4 --gpus 0 1
+#   python make_artifacts.py figures --only attack_sweep scaling
+
+# ---- N = 30 ----
+
+[[run]]
+name = "attacks"
+kind = "train"
+n = 30
+rounds = 1000
+protocol = ["rvfl", "fltrust"]
+eval_every = 1
+train_subset = 5000
+
+[[run]]
+name = "attacks"
+kind = "train"
+n = 30
+rounds = 1000
+attack = ["label_flip_fltrust", "trim_fltrust", "adaptive_fltrust", "krum_fltrust"]
+malicious_rate = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95]
+protocol = ["rvfl", "fltrust"]
+eval_every = 1
+train_subset = 5000
+
+# The Scaling attack is targeted: it is measured by the attack success rate on inputs carrying the
+# trigger, next to the clean test accuracy.
+[[run]]
+name = "attacks"
+kind = "train"
+n = 30
+rounds = 1000
+attack = "scaling_fltrust"
+malicious_rate = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95]
+protocol = ["rvfl", "fltrust"]
+eval_every = 1
+eval_train = false
+
+# ---- N = 100 ----
+
+[[run]]
+name = "attacks"
+kind = "train"
+n = 100
+rounds = 2500
+protocol = ["rvfl", "fltrust"]
+eval_every = 1
+train_subset = 5000
+
+[[run]]
+name = "attacks"
+kind = "train"
+n = 100
+rounds = 2500
+attack = ["label_flip_fltrust", "trim_fltrust", "adaptive_fltrust", "krum_fltrust"]
+malicious_rate = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95]
+protocol = ["rvfl", "fltrust"]
+eval_every = 1
+train_subset = 5000
+
+# The Scaling attack is targeted: it is measured by the attack success rate on inputs carrying the
+# trigger, next to the clean test accuracy.
+[[run]]
+name = "attacks"
+kind = "train"
+n = 100
+rounds = 2500
+attack = "scaling_fltrust"
+malicious_rate = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95]
+protocol = ["rvfl", "fltrust"]
+eval_every = 1
+eval_train = false
