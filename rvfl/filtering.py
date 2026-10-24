@@ -325,13 +325,24 @@ def _update_file(out, link, key, value):
     out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
+def _find_e2e(runs, link, **settings):
+    """The end-to-end point without the filter on the link with this label, or None. The
+    config stores the link as "Mbit/s:RTT ms", the cost model and the folders use its label."""
+    from . import logs
+    found = [d for d in logs.find_points(runs, kind="e2e", filter="none", **settings)
+             if logs.link_label(json.loads((d / "config.json").read_text(encoding="utf-8"))["link"]) == link]
+    if len(found) > 1:
+        raise SystemExit(f"{len(found)} runs under {runs} match {settings} on {link}: {[str(d) for d in found]}")
+    return found[0] if found else None
+
+
 def fit_main(args):
     """time = A / k + B per n, from end-to-end runs without the filter at t = n // 3."""
     from . import logs
     pts_by_n, missing, fits = {}, [], []
     for n in args.n:
         for k in sorted({k for k in args.k if k <= n // 3} | {n // 3}):
-            d = logs.find_point(args.runs, kind="e2e", n=n, k1=k, link=args.link, filter="none", t=None)
+            d = _find_e2e(args.runs, args.link, n=n, k1=k, t=None)
             s = _round_seconds(d) if d else None
             if s is None:
                 missing.append(f"N{n}_k{k}")
@@ -360,7 +371,7 @@ def fit_grid_main(args):
         cp = privacy_bound(c)
         points, missing = [], []
         for n, k in grid_points(c, args.n_total):
-            d = logs.find_point(args.runs, kind="e2e", n=n, k1=k, link=args.link, filter="none", t=k + cp)
+            d = _find_e2e(args.runs, args.link, n=n, k1=k, t=k + cp)
             s = _round_seconds(d) if d else None
             if s is None:
                 missing.append(f"N{n}_k{k}_t{k + cp}")

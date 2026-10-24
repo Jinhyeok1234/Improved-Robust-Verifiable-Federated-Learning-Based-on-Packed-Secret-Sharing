@@ -213,6 +213,8 @@ def point_dir(out, p):
             tag += f"_{p['filter']}_a{p['alpha']:g}"
             if p["filter"] == "optimal_nk":
                 tag += f"_{p['threshold']}"
+            if p["addback"] != "random":
+                tag += f"_{p['addback']}"
         elif p["cos_reveal"] == "enroll":
             tag += "_cosenroll"
         if p["attack"]:
@@ -549,7 +551,8 @@ def main():
     dirs = [point_dir(args.out, p) for p in points]
     if len(set(dirs)) != len(dirs):
         dup = sorted({str(d) for d in dirs if dirs.count(d) > 1})
-        raise SystemExit(f"several points map to the same folder: {dup}; give the entries different names")
+        raise SystemExit(f"several points map to the same folder: {dup}; they differ only in settings "
+                         "the folder name does not show, so put them in entries with different names")
     if args.list:
         for p, d in zip(points, dirs):
             print(f"{'done ' if is_done(d) else '     '}{d}")

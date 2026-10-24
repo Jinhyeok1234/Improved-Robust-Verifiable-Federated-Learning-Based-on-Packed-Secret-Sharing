@@ -166,11 +166,15 @@ def done(points):
     return [p for p in points if logs.read_status(p).get("status") == "ok"]
 
 
+# the cost and end-to-end tables of the paper are at P-521
+TABLE_GROUP = dict(backend="ec", level="256")
+
+
 def cost_points(runs, **settings):
     """{(n, k1): folder} of the finished cost points with these settings (filter off, t = n // 3)."""
     out = {}
     for d in done(logs.find_points(runs, kind="cost", filter="none", t=None, cos_reveal="verify",
-                                   attack=None, **settings)):
+                                   attack=None, **TABLE_GROUP, **settings)):
         cfg = logs.read_config(d)
         key = (cfg["n"], cfg["k1"])
         if key in out:
@@ -259,7 +263,7 @@ def link_text(label):
 def e2e_points(runs, link):
     out = {}
     for d in done(logs.find_points(runs, kind="e2e", filter="none", t=None, cos_reveal="verify",
-                                   attack=None, link=link)):
+                                   attack=None, link=link, **TABLE_GROUP)):
         cfg = logs.read_config(d)
         key = (cfg["n"], cfg["k1"])
         if key in out:
