@@ -19,8 +19,9 @@ Kinds and their settings (default in brackets):
     name            folder name of the experiment (required)
     kind            "train" | "cost" | "e2e" | "curve_bench" (required)
     n               number of clients N (required)
-    seed            [0] fixes the data partition, the initial model, every local training
-                    (one seed per round and party) and the filter's add-back draw
+    seed            [0] fixes the data partition, the initial model, the random draws of every
+                    local training (one seed per round and party) and the filter's add-back
+                    draw; a point repeats exactly on the CPU, not on a GPU (README.md)
     dataset         ["CIFAR10"]         model ["ResNet20"]
     data_dir        ["./dataset"]       partition_dir ["./partitions"]
     device          ["auto"] (CUDA when available)

@@ -22,8 +22,9 @@ def seed_everything(s: int):
 
 def seed_round(seed: int, iteration: int, party_id: int):
     """One seed per (round, party) before its local training: the data shuffling, the
-    poisoning draw and the model-poisoning attacks that follow draw from it, so a point run
-    twice gives the same updates in every round, whatever else ran in between."""
+    poisoning draw and the model-poisoning attacks that follow draw from it, so on the CPU a
+    point run twice gives the same updates in every round, whatever else ran in between (on a
+    GPU some kernels are not deterministic)."""
     seed_everything(seed + iteration * 4096 + (party_id + 1))
 
 

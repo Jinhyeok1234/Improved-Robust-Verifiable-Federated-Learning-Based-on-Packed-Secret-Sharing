@@ -82,8 +82,10 @@ at the top of `run.py`. The kinds:
   parties (one machine plays all of them) and excluded from the communication timers.
 - `curve_bench`: the VPSS primitives timed per elliptic curve.
 
-`seed` (default 0) fixes the data split, the initial model, and every local training (one seed
-per round and party), so a point run twice gives the same model.
+`seed` (default 0) fixes the data split, the initial model, and the random draws of every local
+training (one seed per round and party). On the CPU a point run twice gives the same model. On a
+GPU the runs differ slightly: cuDNN's convolutions and the backward passes of the pooling layers
+add up in an order that changes from run to run.
 
 `--jobs` runs several `train` points at once; timing points always run one at a time.
 
