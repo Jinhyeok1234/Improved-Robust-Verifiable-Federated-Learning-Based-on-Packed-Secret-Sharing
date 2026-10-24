@@ -3,7 +3,7 @@
 # without the filter (python -m rvfl.filtering fit ...).
 #
 #   sudo -E "$(which python)" run.py experiments/filter.toml
-#   python make_artifacts.py figures --only filter --filter-runs runs/filter
+#   python make_artifacts.py figures --only filter
 
 [[run]]
 name = "filter"
