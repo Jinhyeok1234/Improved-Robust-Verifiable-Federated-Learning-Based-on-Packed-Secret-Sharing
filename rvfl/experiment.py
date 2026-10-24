@@ -92,9 +92,10 @@ def set_up_attack(clients, attack, malicious_rate):
         raise ValueError(f"unknown attack {attack!r}; one of {attacks.ATTACKS}")
     ids = attacks.malicious_ids(len(clients), malicious_rate)
     cfg = attacks.poisoning_config(attack)
-    if cfg is not None:
-        for cid in ids:
+    for cid in ids:
+        if cfg is not None:
             clients[cid].set_poisoning(cfg)
+        clients[cid].submission_scale = attacks.submission_scale(attack, len(clients))
     return ids
 
 

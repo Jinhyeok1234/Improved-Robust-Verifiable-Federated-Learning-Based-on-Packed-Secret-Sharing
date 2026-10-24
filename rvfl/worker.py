@@ -99,8 +99,11 @@ def worker_main(spec, all_barrier, client_barrier, compute_lock, start_gate, end
     party._client_barrier = None if is_server else client_barrier
 
     if not is_server and spec["party_id"] in spec["malicious_ids"] and spec["poison"]:
-        from .attacks import poisoning_config
-        party.set_poisoning(poisoning_config(spec["poison"]))
+        from .attacks import poisoning_config, submission_scale
+        cfg = poisoning_config(spec["poison"])
+        if cfg is not None:
+            party.set_poisoning(cfg)
+        party.submission_scale = submission_scale(spec["poison"], spec["n"])
 
     out_dir = Path(spec["out_dir"])
     fout = (out_dir / f"worker_{spec['party_id']}.jsonl").open("w", encoding="utf-8")

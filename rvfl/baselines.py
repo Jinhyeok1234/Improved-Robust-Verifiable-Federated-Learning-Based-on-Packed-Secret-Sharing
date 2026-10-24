@@ -241,7 +241,7 @@ class BreaClient(Client):
         # negative coordinates are shared as their residues mod q, the values the commitments
         # bind; the server maps the reconstructed sums back to signed values
         q_int = self.pp.q.to_int()
-        quantized = [v % q_int for v in Party.quantize(self.g_i, 10 ** BREA_EXP)]
+        quantized = [v % q_int for v in Party.quantize(self.g_i * self.submission_scale, 10 ** BREA_EXP)]
         shares, commitments = vpss.PedersenVPSS.distribute(
             self.pp, self.config1, Party.to_bigint_vector(quantized), thread_count=thread_count,
             return_blinds=False)

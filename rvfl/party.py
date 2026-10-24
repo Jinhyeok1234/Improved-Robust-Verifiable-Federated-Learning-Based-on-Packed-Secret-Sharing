@@ -562,6 +562,9 @@ class Client(Party):
     def __init__(self, id: int, ip: str, port: int, server_addr, **kwargs):
         super().__init__(id, ip, port, **kwargs)
         self.party_map = {SERVER_ID: server_addr}
+        # what the client submits is multiplied by this; a Scaling attacker sets it to N
+        # (rvfl.attacks.submission_scale), and the verification then rejects the submission
+        self.submission_scale = 1
 
     @property
     def g_i(self):
@@ -613,7 +616,7 @@ class Client(Party):
             tl['recompute_server_share_ms'] = (t_gs - t_base) * 1000
             if not self.cos_at_enrollment:
                 self.cos = self._cosine(g_server)
-            g_i_perp = Party.get_perpendicular_vector(self.g_i, g_server)
+            g_i_perp = Party.get_perpendicular_vector(self.g_i, g_server) * self.submission_scale
             self.shares, _ = vpss.NoneVPSS.distribute(
                 self.pp, self.config1, Party.to_bigint_vector(Party.quantize(g_i_perp, mult)),
                 thread_count=thread_count)

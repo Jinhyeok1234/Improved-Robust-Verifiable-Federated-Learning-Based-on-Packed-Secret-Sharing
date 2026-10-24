@@ -23,8 +23,8 @@ Attacks:
     trigger-stamped, target-relabeled data (poisoning_config) and submit their update scaled by
     lambda = n. Evaluated by the attack success rate on trigger-embedded inputs, not by test
     error. FLTrust normalizes every g_i to ||g_S||, so the scaling is normalized away there; in
-    RVFL the scaled perpendicular vector fails the norm check and is rejected
-    (rvfl.baselines.rvfl_plaintext_aggregate).
+    RVFL the scaled perpendicular vector fails the norm check and is rejected (by the
+    protocol's verification, and by rvfl.baselines.rvfl_plaintext_aggregate in the clear).
   - "krum_fltrust": Fang et al. (2020) Krum attack (full knowledge), crafted against the Krum
     aggregation rule and applied to FLTrust (transferability, as the FLTrust paper does). All
     c malicious send the SAME update g'_1 = -lambda*s, s = sign(sum of honest updates); lambda
@@ -42,7 +42,8 @@ import torch
 
 DATA_POISON_ATTACKS = ("label_flip_fltrust", "scaling_fltrust")
 # Scaling is not here: its data side is a data poisoning, and its lambda scaling is applied
-# where the update is submitted (rvfl.baselines), so it needs no per-round g_i overwrite.
+# where the update is submitted (Client.submission_scale in the protocol, BREA included;
+# rvfl.baselines in the clear), so it needs no per-round g_i overwrite.
 MODEL_POISON_ATTACKS = ("trim_fltrust", "adaptive_fltrust", "krum_fltrust")
 ATTACKS = DATA_POISON_ATTACKS + MODEL_POISON_ATTACKS
 
@@ -55,6 +56,12 @@ SCALING_POISON_RATE = 0.5
 def malicious_ids(n_clients: int, rate: float) -> List[int]:
     """The malicious clients: the first floor(n_clients * rate) ids."""
     return list(range(int(math.floor(n_clients * rate))))
+
+
+def submission_scale(attack, n_clients: int) -> int:
+    """The factor lambda a malicious client multiplies its submission by: n under the Scaling
+    attack, 1 otherwise."""
+    return n_clients if attack == "scaling_fltrust" else 1
 
 
 def poisoning_config(attack, num_classes: int = 10):
