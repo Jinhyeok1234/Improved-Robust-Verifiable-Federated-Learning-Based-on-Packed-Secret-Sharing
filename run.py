@@ -81,12 +81,17 @@ which is harmless for accuracy but would distort the timings of cost and curve_b
 and e2e points share the network namespaces, so those always run one at a time. With several
 GPUs, --gpus 0 1 hands the parallel points the GPUs in turn (CUDA_VISIBLE_DEVICES).
 
+Ctrl+C, kill and a closed terminal (unless the run is under nohup) stop a run and clean up after
+it: the parties and the network namespaces of an end-to-end point, the children of --jobs. The
+point that was running has no status then and runs again from the start next time.
+
 The timings of the paper were taken with jemalloc preloaded (see README.md).
 """
 import argparse
 import itertools
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -468,18 +473,23 @@ def run_e2e(p, out):
     except Exception as e:
         status = f"error: {e!r}"
     finally:
-        for proc in procs:
-            if proc.is_alive():
-                proc.terminate()
-        try:
-            testbed.teardown(parties, announce=False)
-        except Exception:
-            pass
-        # every worker's records into one file
-        with open(out / "parties.jsonl", "w", encoding="utf-8") as f:
-            for wf in sorted(out.glob("worker_*.jsonl")):
-                f.write(wf.read_text(encoding="utf-8"))
-                wf.unlink()
+        with uninterrupted():
+            for proc in procs:
+                if proc.is_alive():
+                    proc.terminate()
+            for proc in procs:
+                proc.join(timeout=10)
+                if proc.is_alive():
+                    proc.kill()
+            try:
+                testbed.teardown(parties, announce=False)
+            except Exception:
+                pass
+            # every worker's records into one file
+            with open(out / "parties.jsonl", "w", encoding="utf-8") as f:
+                for wf in sorted(out.glob("worker_*.jsonl")):
+                    f.write(wf.read_text(encoding="utf-8"))
+                    wf.unlink()
     return status
 
 
@@ -497,6 +507,59 @@ def run_curve_bench(p, out):
 
 
 RUNNERS = {"train": run_train, "cost": run_cost, "e2e": run_e2e, "curve_bench": run_curve_bench}
+
+
+# --- interruption ----------------------------------------------------------------------------
+
+def _interrupted(signum, frame):
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
+def stop_on_signals():
+    """kill (SIGTERM) and a closed terminal (SIGHUP) end a run the way Ctrl+C does, so the
+    clean-up below runs: the parties and the network namespaces of an end-to-end point, the
+    children of --jobs. A signal that is ignored (SIGHUP under nohup) stays ignored."""
+    for s in (signal.SIGTERM, signal.SIGHUP):
+        if signal.getsignal(s) is not signal.SIG_IGN:
+            signal.signal(s, _interrupted)
+
+
+class uninterrupted:
+    """Ignore Ctrl+C and kill while the clean-up runs, so a second one cannot cut it short."""
+    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __enter__(self):
+        self.saved = {s: signal.signal(s, signal.SIG_IGN) for s in self.SIGNALS}
+
+    def __exit__(self, *exc):
+        for s, h in self.saved.items():
+            signal.signal(s, h)
+
+
+def run_parallel(args, queue, running, gpu_turn, failed):
+    """--jobs: start the queued train points as child processes, at most args.jobs at a time,
+    until all have finished; `running` holds the children still going."""
+    while queue or running:
+        while queue and len(running) < args.jobs:
+            p, d = queue.pop(0)
+            d.parent.mkdir(parents=True, exist_ok=True)
+            env = dict(os.environ, PYTHONUNBUFFERED="1")
+            gpu = next(gpu_turn)
+            if gpu is not None:
+                env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            log = open(d.parent / f"{d.name}.log", "w", encoding="utf-8")
+            proc = subprocess.Popen([sys.executable, __file__, "--out", args.out, "--point", json.dumps(p)],
+                                    stdout=log, stderr=subprocess.STDOUT, env=env)
+            running.append((proc, d, log))
+            print(f"[run] started {d} (output: {d.parent / (d.name + '.log')})", flush=True)
+        time.sleep(1.0)
+        for proc, d, log in list(running):
+            if proc.poll() is not None:
+                log.close()
+                running.remove((proc, d, log))
+                print(f"[run] {'finished' if proc.returncode == 0 else 'FAILED'} {d}", flush=True)
+                if proc.returncode != 0:
+                    failed.append(d)
 
 
 def run_point(p, out):
@@ -536,8 +599,11 @@ def main():
     ap.add_argument("--gpus", nargs="+", help="GPU ids handed to parallel points in turn")
     ap.add_argument("--point", help=argparse.SUPPRESS)      # internal: one point, as JSON
     args = ap.parse_args()
+    stop_on_signals()
 
     if args.point:                                          # a child of --jobs
+        from rvfl.worker import die_with_parent
+        die_with_parent()
         p = json.loads(args.point)
         sys.exit(0 if run_point(p, point_dir(args.out, p)) == "ok" else 1)
 
@@ -569,27 +635,18 @@ def main():
         running = []
         queue = list(parallel)
         gpu_turn = itertools.cycle(args.gpus or [None])
-        while queue or running:
-            while queue and len(running) < args.jobs:
-                p, d = queue.pop(0)
-                d.parent.mkdir(parents=True, exist_ok=True)
-                env = dict(os.environ, PYTHONUNBUFFERED="1")
-                gpu = next(gpu_turn)
-                if gpu is not None:
-                    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-                log = open(d.parent / f"{d.name}.log", "w", encoding="utf-8")
-                proc = subprocess.Popen([sys.executable, __file__, "--out", args.out, "--point", json.dumps(p)],
-                                        stdout=log, stderr=subprocess.STDOUT, env=env)
-                running.append((proc, d, log))
-                print(f"[run] started {d} (output: {d.parent / (d.name + '.log')})", flush=True)
-            time.sleep(1.0)
-            for proc, d, log in list(running):
-                if proc.poll() is not None:
+        try:
+            run_parallel(args, queue, running, gpu_turn, failed)
+        finally:
+            with uninterrupted():
+                for proc, d, log in running:      # left only when the run was interrupted
+                    proc.terminate()
+                for proc, d, log in running:
+                    try:
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
                     log.close()
-                    running.remove((proc, d, log))
-                    print(f"[run] {'finished' if proc.returncode == 0 else 'FAILED'} {d}", flush=True)
-                    if proc.returncode != 0:
-                        failed.append(d)
     for p, d in serial:
         print(f"\n[run] {d}", flush=True)
         status = run_point(p, d)

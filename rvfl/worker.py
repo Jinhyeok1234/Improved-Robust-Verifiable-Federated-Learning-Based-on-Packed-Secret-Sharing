@@ -34,12 +34,27 @@ def _enter_netns(ns_name: str):
         os.close(fd)
 
 
+def die_with_parent():
+    """Linux: have the kernel send this process SIGKILL when its parent ends, however it ends
+    (so no party is left behind when run.py is killed). Elsewhere a no-op."""
+    import ctypes
+    import signal
+    parent = os.getppid()
+    try:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        return
+    if os.getppid() != parent:            # the parent ended before the request took effect
+        os._exit(1)
+
+
 def _exhaust(gen):
     for _ in gen:
         pass
 
 
 def worker_main(spec, all_barrier, client_barrier, compute_lock, start_gate, end_gate):
+    die_with_parent()
     _enter_netns(spec["netns"])
 
     import torch
