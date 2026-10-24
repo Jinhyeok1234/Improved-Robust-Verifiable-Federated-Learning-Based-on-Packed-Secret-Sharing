@@ -32,10 +32,8 @@ public:
     Serializer() : oss(std::ios::binary) {}
 
     void write_bigint(const BigInt& n) {
-        // [B1] Raw big-endian magnitude with a sign byte and a length prefix.
-        // The previous encoding wrote the value as a hexadecimal ASCII string, so every
-        // field element took two bytes per byte of value: a 512-bit residue went on the
-        // wire as 128 characters plus a 4-byte length (132 bytes) instead of 69.
+        // Raw big-endian magnitude with a sign byte and a 4-byte length prefix: a 512-bit
+        // residue takes 69 bytes (as a hexadecimal string it would take 132).
         uint8_t sign_byte = (mpz_sgn(n.get_mpz_t()) < 0) ? 1 : 0;
         size_t byte_count = 0;
         std::vector<unsigned char> buf((mpz_sizeinbase(n.get_mpz_t(), 2) + 7) / 8 + 1);
@@ -123,7 +121,7 @@ public:
     Deserializer(const std::string& s) : data(s), pos(0) {}
 
     BigInt read_bigint() {
-        // [B1] counterpart of write_bigint: sign byte, length, big-endian magnitude.
+        // Counterpart of write_bigint: sign byte, length, big-endian magnitude.
         if (pos + 1 + sizeof(uint32_t) > data.size()) throw std::runtime_error("Stream too short");
         uint8_t sign_byte = static_cast<uint8_t>(data[pos]);
         pos += 1;
@@ -335,21 +333,6 @@ PYBIND11_MODULE(vpss_module, m) {
         })
         .def("__str__", [](const BigInt& self) { return self.get_str(); })
         .def("__repr__", [](const BigInt& self) { return "<BigInt " + self.get_str() + ">"; })
-
-        // .def(py::self + py::self)
-        // .def(py::self - py::self)
-        // .def(py::self * py::self)
-        // .def(py::self / py::self)
-        // .def(py::self % py::self)
-        // .def(py::self == py::self)
-        // .def(py::self != py::self)
-
-        // .def("__add__", [](const BigInt& a, long long b) { return a + BigInt(static_cast<long>(b)); })
-        // .def("__sub__", [](const BigInt& a, long long b) { return a - BigInt(static_cast<long>(b)); })
-        // .def("__mul__", [](const BigInt& a, long long b) { return a * BigInt(static_cast<long>(b)); })
-        // .def("__mod__", [](const BigInt& a, long long b) { return a % BigInt(static_cast<long>(b)); })
-        // .def("__radd__", [](const BigInt& a, long long b) { return BigInt(static_cast<long>(b)) + a; })
-        // .def("__rmul__", [](const BigInt& a, long long b) { return BigInt(static_cast<long>(b)) * a; })
 
         .def("__add__", [](const BigInt& a, const BigInt& b) -> BigInt { return BigInt(a + b); })
         .def("__add__", [](const BigInt& a, long long b) -> BigInt { return BigInt(a + mpz_class(static_cast<long>(b))); })

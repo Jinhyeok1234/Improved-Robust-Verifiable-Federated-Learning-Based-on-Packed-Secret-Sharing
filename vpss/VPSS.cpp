@@ -177,8 +177,8 @@ struct PublicParameters {
     BigInt g; // Generator g
     BigInt h; // Generator h (used for Pedersen)
 
-    // Which instantiation of the commitment group is in use. ZP reproduces the original
-    // behaviour exactly; EC carries affine points encoded as x * 2^fieldBits + y.
+    // Which instantiation of the commitment group is in use: ZP is Z_p* with a prime-order
+    // subgroup, EC carries affine points encoded as x * 2^fieldBits + y.
     GroupType groupType = GroupType::ZP;
     int curveNid = 0;          // EC only: OpenSSL curve NID
     unsigned fieldBits = 0;    // EC only: bits reserved for each affine coordinate
@@ -233,7 +233,6 @@ template <> struct BatchShare<VerificationMode::Pedersen> {
  * @brief Configuration object for initializing the VPSS scheme.
  */
 struct VPSSConfig {
-    // VerificationMode vssType;
     PaddingMode padType;
     bool deterministicRand = false;
     size_t t;                // Privacy threshold (reconstruction requires t shares)
@@ -438,12 +437,6 @@ public:
             BigInt yi = points[i].second;
             const Polynomial& basisPoly = (*basisPtr)[i];
 
-            // for (size_t k = 0; k < n; ++k) {
-            //         BigInt term = (basisPoly[k] * yi) % mod;
-            //         finalCoeffs[k] = (finalCoeffs[k] + term) % mod;
-            //     }
-            // }
-
             for (size_t k = 0; k < n; ++k) {
                 BigInt term = basisPoly[k];
                 term *= yi;
@@ -532,53 +525,6 @@ public:
 
         return solution;
     }
-    // static std::vector<BigInt> solveLinearSystem(std::vector<std::vector<BigInt>> A, std::vector<BigInt> b, const BigInt& mod) {
-    //     size_t n = A.size();
-    //     size_t m = A[0].size();
-
-    //     for (size_t i = 0; i < std::min(n, m); ++i) {
-    //         // Pivot selection
-    //         size_t pivot = i;
-    //         while (pivot < n && A[pivot][i] == 0) pivot++;
-    //         if (pivot == n) continue; // No pivot in this column
-
-    //         std::swap(A[i], A[pivot]);
-    //         std::swap(b[i], b[pivot]);
-
-    //         BigInt temp = A[i][i] % mod;
-    //         if (mpz_sgn(temp.get_mpz_t()) == 0) {
-    //             std::cerr << "[CRITICAL] Pivot is zero even after swap at row " << i << std::endl;
-    //         }
-
-    //         // Normalize pivot row
-    //         BigInt inv = modInverse(A[i][i], mod);
-    //         for (size_t j = i; j < m; ++j) A[i][j] = (A[i][j] * inv) % mod;
-    //         b[i] = (b[i] * inv) % mod;
-
-    //         // Eliminate other rows
-    //         for (size_t k = 0; k < n; ++k) {
-    //             if (k != i && A[k][i] != 0) {
-    //                 BigInt factor = A[k][i];
-    //                 for (size_t j = i; j < m; ++j) {
-    //                     BigInt sub = (factor * A[i][j]) % mod;
-    //                     BigInt val = A[k][j] - sub;
-    //                     if (A[k][j] < sub) val += mod;
-    //                     A[k][j] = val;
-    //                 }
-    //                 BigInt subB = (factor * b[i]) % mod;
-    //                 BigInt val = b[k] - subB;
-    //                 if (b[k] < subB) val += mod;
-    //                 b[k] = val;
-    //             }
-    //         }
-    // //     }
-
-    //     // Extract solution (assuming unique solution for the first m variables)
-    //     std::vector<BigInt> x(m);
-    //     for (size_t i = 0; i < m; ++i) x[i] = b[i];
-    //     return x;
-    // }
-
     /**
      * @brief Performs Reed-Solomon Error Correction using the Berlekamp-Welch algorithm.
      * Reconstructs polynomial P(x) even if some shares are corrupted.
@@ -656,11 +602,8 @@ public:
         for (size_t i = 0; i < e; ++i) polyE[i] = solution[numVarsN + i];
         polyE[e] = 1; // Monic
 
-        // P(x) = N(x) / E(x) (Polynomial division)
-        // Since E(x) divides N(x) perfectly for valid RS codewords, 
-        // we can just compute N(x)/E(x). 
-        // Simple synthetic division or just evaluating at enough points and interpolating again.
-        // Let's use simple synthetic division since E is monic.
+        // P(x) = N(x) / E(x): E(x) divides N(x) exactly for a valid codeword, and E is monic,
+        // so synthetic division suffices.
 
         Polynomial polyP(degree + 1, 0);
         // polyN = polyP * polyE
@@ -1013,14 +956,14 @@ public:
             throw std::invalid_argument("Vector sizes must be equal.");
         }
 
-        // [B7] The product / sum is written into a per-thread scratch mpz and only the reduced
-        // result goes back into the destination. Writing the wider intermediate into the
-        // destination itself made GMP reallocate that element on every iteration, and the
-        // allocator lock then serialised the parallel loop: with a 9-limb modulus, adding a
-        // second thread made this loop SLOWER rather than faster. The scratch is allocated
-        // once per thread, wide enough for the intermediate, so nothing reallocates inside.
+        // The sum is written into a per-thread scratch mpz and only the reduced result goes
+        // back into the destination. Writing the wider intermediate into the destination
+        // itself would make GMP reallocate that element on every iteration, and the allocator
+        // lock would then serialise the parallel loop (with a 9-limb modulus, a second thread
+        // made the loop slower rather than faster). The scratch is allocated once per thread,
+        // wide enough for the intermediate, so nothing reallocates inside.
         const size_t scratch_bits = mpz_sizeinbase(mod.get_mpz_t(), 2) + 128;
-        // [B7] Give every destination element room for a full residue BEFORE going parallel.
+        // Give every destination element room for a full residue before going parallel.
         // A share vector holds values of mixed width -- when k equals t the polynomial carries
         // no random coefficient, so some evaluations are only a few limbs wide -- and writing a
         // full-width residue into a narrow element reallocates it. Inside the parallel loop
@@ -1047,7 +990,7 @@ public:
         {
             mpz_t scratch;
             mpz_init2(scratch, scratch_bits);
-            // [B7] Dynamic schedule with a chunk sized from the actual work. When k equals t
+            // Dynamic schedule with a chunk sized from the actual work. When k equals t
             // the polynomial carries no random coefficient, so a share vector mixes narrow and
             // full-width values and a static split stalls on the heavy chunk. A fixed chunk is
             // the wrong answer though: it has to be small enough that there are several chunks
@@ -1071,16 +1014,10 @@ public:
      */
     static void scaleVector(std::vector<BigInt>& vector, const BigInt& scalar, const BigInt& mod) {
 
-        // [B7] Same reason as addVectors: keep the wide intermediate out of the destination.
+        // Scratch for the product, as in addVectors: the wide intermediate stays out of the destination.
         const size_t scratch_bits = mpz_sizeinbase(mod.get_mpz_t(), 2)
                                   + mpz_sizeinbase(scalar.get_mpz_t(), 2) + 128;
-        // [B7] Give every destination element room for a full residue BEFORE going parallel.
-        // A share vector holds values of mixed width -- when k equals t the polynomial carries
-        // no random coefficient, so some evaluations are only a few limbs wide -- and writing a
-        // full-width residue into a narrow element reallocates it. Inside the parallel loop
-        // that reallocation takes the allocator lock and makes the loop slower with more
-        // threads than with one. Doing it here is serial, once per vector, and allocation-free
-        // for elements that are already wide enough.
+        // Room for a full residue in every destination element, as in addVectors.
         const size_t n_elements = vector.size();
         const size_t mod_bits = mpz_sizeinbase(mod.get_mpz_t(), 2);
         const size_t mod_limbs = (mod_bits + GMP_NUMB_BITS - 1) / GMP_NUMB_BITS;
@@ -1101,13 +1038,7 @@ public:
         {
             mpz_t scratch;
             mpz_init2(scratch, scratch_bits);
-            // [B7] Dynamic schedule with a chunk sized from the actual work. When k equals t
-            // the polynomial carries no random coefficient, so a share vector mixes narrow and
-            // full-width values and a static split stalls on the heavy chunk. A fixed chunk is
-            // the wrong answer though: it has to be small enough that there are several chunks
-            // per thread (otherwise dynamic behaves like static) and large enough that handing
-            // one out costs less than doing it (otherwise the uniform case pays for nothing).
-            // Aiming at 8 chunks per thread, floored at 256, satisfies both.
+            // Dynamic schedule with the chunk of addVectors.
             #pragma omp for schedule(dynamic, CHUNK)
             for (long long index = 0; index < static_cast<long long>(vector.size()); ++index) {
                 mpz_mul(scratch, vector[index].get_mpz_t(), scalar.get_mpz_t());
@@ -1294,12 +1225,12 @@ public:
 
         Polynomial poly;
 
-        // [Optimization] If we have exactly N shares matching the cached indices, use the cache.
-        // This avoids recomputing Lagrange basis (expensive modular inverses).
+        // With exactly N shares at the cached indices, the cached Lagrange basis is used; this
+        // avoids the modular inverses of recomputing it.
         bool canUseCache = false;
         if (config.isBasisCached && shares.size() == config.N) {
             canUseCache = true;
-            // Verify indices match cachedShareBasis logic (assuming shares are sorted or matching shareIndices)
+            // The cached basis belongs to shareIndices, in that order
             for (size_t i = 0; i < config.N; ++i) {
                 if (shares[i].x != config.shareIndices[i]) {
                     canUseCache = false;
@@ -1311,8 +1242,8 @@ public:
         if (canUseCache) {
             // --- Method B: Interpolate N points using Cache ---
             std::vector<std::pair<BigInt, BigInt>> points;
-            // Actually interpolatePolynomial with cache doesn't use points.first (x) for basis calculation, 
-            // but we pass pairs to match signature.
+            // With a cached basis, interpolatePolynomial reads only the y values; the x values
+            // are passed to fit its signature.
             for (const auto& s : shares) points.push_back({ s.x, s.s });
 
             // This is O(N^2) but only additions/multiplications (No Inversions)
@@ -1412,7 +1343,6 @@ public:
 
         // Pre-allocate internal vectors for shares to avoid race conditions on push_back
         for (size_t i = 0; i < config.N; ++i) {
-            // Assuming 1..N indices here. In real code, get from config.
             outBatchShares[i].x = config.shareIndices[i];
             outBatchShares[i].s_values.resize(numBlocks);
             if constexpr (Mode == VerificationMode::Pedersen) {
